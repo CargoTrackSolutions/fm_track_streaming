@@ -1,0 +1,15 @@
+{
+  "name": "fm-track-demo",
+  "version": "1.0.0",
+  "description": "Simple demo: fm-track Object API + Object Coordinates Streaming API rendered on an OpenStreetMap map.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

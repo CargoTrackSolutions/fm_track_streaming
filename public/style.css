@@ -1,0 +1,131 @@
+/* Minimal layout: fixed sidebar on the left, full-height map on the right. */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+body {
+  display: flex;
+}
+
+/* --- Sidebar --------------------------------------------------------------- */
+#sidebar {
+  width: 300px;
+  flex: 0 0 300px;
+  height: 100%;
+  background: #1f2933;
+  color: #e4e7eb;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#sidebar header {
+  padding: 16px;
+  border-bottom: 1px solid #323f4b;
+}
+
+#sidebar h1 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.status {
+  display: inline-block;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.status--connecting {
+  background: #b7791f;
+  color: #fff;
+}
+.status--live {
+  background: #2f855a;
+  color: #fff;
+}
+
+#vehicle-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.vehicle {
+  padding: 10px 16px;
+  border-bottom: 1px solid #323f4b;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.vehicle:hover {
+  background: #323f4b;
+}
+
+.veh-name {
+  font-weight: 600;
+}
+.veh-meta {
+  font-size: 12px;
+  color: #9aa5b1;
+}
+
+#sidebar footer {
+  padding: 12px 16px;
+  font-size: 11px;
+  color: #7b8794;
+  border-top: 1px solid #323f4b;
+}
+
+/* --- Map ------------------------------------------------------------------- */
+#map {
+  flex: 1;
+  height: 100%;
+}
+
+/* --- Vehicle popup (full last-record data) --------------------------------- */
+.veh-popup {
+  min-width: 300px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.veh-popup-title {
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 2px;
+}
+.veh-popup-meta {
+  font-size: 11px;
+  color: #52606d;
+}
+.veh-popup-meta:last-of-type {
+  margin-bottom: 8px;
+}
+.veh-popup-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+.veh-popup-table td {
+  padding: 2px 6px;
+  border-top: 1px solid #e4e7eb;
+  vertical-align: top;
+}
+.veh-popup-table .pk {
+  color: #616e7c;
+  word-break: break-word;
+  max-width: 260px;
+}
+.veh-popup-table .pv {
+  font-weight: 600;
+  word-break: break-word;
+}

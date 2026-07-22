@@ -1,0 +1,8 @@
+# Dependencies
+node_modules/
+
+# Secrets / local environment
+.env
+
+# Local tool config
+.claude/
