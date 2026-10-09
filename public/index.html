@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>fm-track – live vehicle tracking demo</title>
+    <title>INTEGRATION DEMO</title>
 
     <!-- Leaflet: lightweight open-source map library (uses OpenStreetMap tiles) -->
     <link
@@ -15,18 +15,26 @@
   <body>
     <aside id="sidebar">
       <header>
-        <h1>fm-track demo</h1>
+        <h1>INTEGRATION DEMO</h1>
         <div id="status" class="status status--connecting">connecting…</div>
+        <p id="status-detail" hidden></p>
+        <form id="conn-form" autocomplete="off">
+          <label for="provider">API</label>
+          <select id="provider"></select>
+          <div id="provider-fields"></div>
+          <button type="submit">Connect</button>
+        </form>
       </header>
       <ul id="vehicle-list"></ul>
       <footer>
-        Object API + Coordinates Streaming API (SSE) on OpenStreetMap.
+        <span id="provider-description"></span>
+        Rendered on OpenStreetMap.
       </footer>
     </aside>
 
     <div id="map"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="app.js"></script>
+    <script type="module" src="app.js"></script>
   </body>
 </html>

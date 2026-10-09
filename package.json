@@ -1,7 +1,7 @@
 {
-  "name": "fm-track-demo",
+  "name": "integration-demo",
   "version": "1.0.0",
-  "description": "Simple demo: fm-track Object API + Object Coordinates Streaming API rendered on an OpenStreetMap map.",
+  "description": "Integration demo: fm-track (Object API + SSE stream) and CargoTrack (atlas / ddata) vehicle positions on an OpenStreetMap map.",
   "type": "module",
   "scripts": {
     "start": "node server.js"

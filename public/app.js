@@ -1,11 +1,20 @@
 // -----------------------------------------------------------------------------
-// Front-end: fetch the object list, then subscribe to the live coordinate
-// stream and draw every incoming position on an OpenStreetMap map.
+// Front-end shell: map, sidebar and connection form, shared by all APIs.
 //
-// Flow (as recommended by the fm-track docs):
-//   1. GET /api/objects  -> learn which objects exist + their names
-//   2. GET /api/stream   -> open an SSE stream and update markers in real time
+// Each API lives in its own module under providers/. A provider declares the
+// credential fields it needs (stored under credsKey, if several entries share
+// one account) and a start(creds, ui) function. It converts the
+// API's records into one common vehicle shape and hands them to ui.upsert():
+//
+//   { id, name?, lat, lng, speed?, ignition?, time: Date | null, raw }
+//
+// `raw` is the untouched API record; the popup shows every field of it.
 // -----------------------------------------------------------------------------
+
+import fmTrack from "./providers/fm-track.js";
+import { atlas, ddata } from "./providers/cargotrack.js";
+
+const PROVIDERS = [atlas, ddata, fmTrack];
 
 // --- Map setup ---------------------------------------------------------------
 // Centered roughly on Romania; the view auto-fits once real positions arrive.
@@ -17,18 +26,24 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 }).addTo(map);
 
 // --- State -------------------------------------------------------------------
-const markers = {}; // object_id -> Leaflet marker
-const names = {}; // object_id -> display name (from the Object API)
-const lastKey = {}; // object_id -> last seen "datetime" (used for de-duplication)
-const lastCoord = {}; // object_id -> last full coordinate record
-const receivedAt = {}; // object_id -> Date the last record arrived in the browser
+const markers = {}; // id -> Leaflet marker
+const names = {}; // id -> display name
+const lastKey = {}; // id -> last seen position time (used for de-duplication)
+const lastVehicle = {}; // id -> last vehicle record
+const receivedAt = {}; // id -> Date the last record arrived in the browser
 let hasFittedBounds = false;
+let stopProvider = null; // stops the running provider
+let session = 0; // bumped on every (re)connect; stale callbacks are ignored
 
 // --- Small helpers -----------------------------------------------------------
-function setStatus(text, cssClass) {
+// `detail` is an optional longer explanation shown under the badge.
+function setStatus(text, kind, detail) {
   const el = document.getElementById("status");
   el.textContent = text;
-  el.className = "status " + cssClass;
+  el.className = "status status--" + kind;
+  const detailEl = document.getElementById("status-detail");
+  detailEl.textContent = detail || "";
+  detailEl.hidden = !detail;
 }
 
 // Escape user/API-supplied text before injecting it into innerHTML.
@@ -36,22 +51,6 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
   );
-}
-
-// Human-readable duration for the "Delay" line, e.g. 1250 -> "1 s", 65000 -> "1 min 5 s".
-function formatDuration(ms) {
-  if (!isFinite(ms)) return "—";
-  const negative = ms < 0;
-  let total = Math.round(Math.abs(ms) / 1000);
-  const h = Math.floor(total / 3600);
-  total -= h * 3600;
-  const m = Math.floor(total / 60);
-  const s = total - m * 60;
-  const parts = [];
-  if (h) parts.push(h + " h");
-  if (m) parts.push(m + " min");
-  parts.push(s + " s");
-  return (negative ? "-" : "") + parts.join(" ");
 }
 
 // Flatten a (possibly nested) object into [label, value] pairs so we can render
@@ -71,44 +70,38 @@ function flatten(obj, prefix, out) {
   return out;
 }
 
-// Build the popup shown on the map: vehicle name, when the data arrived, and a
-// table of the full last coordinate record.
-function buildPopup(id, coord) {
-  const name = names[id] || id;
+const hasFix = (v) =>
+  v && Number.isFinite(v.lat) && Number.isFinite(v.lng) && !(v.lat === 0 && v.lng === 0);
 
+// Build the popup shown on the map: vehicle name, when the data arrived, and a
+// table of the full raw record.
+function buildPopup(id, v) {
   const arrivedDate = receivedAt[id] || null;
   const arrived = arrivedDate ? arrivedDate.toLocaleString() : "—";
 
   // The record's own timestamp (device/server side), shown in local time.
-  const posDate = coord && coord.datetime ? new Date(coord.datetime) : null;
+  const posDate = v && v.time && !isNaN(v.time) ? v.time : null;
   const positionDate = posDate ? posDate.toLocaleString() : "—";
 
-  // Lag = how far behind the position time was by the time it reached us.
-  const delay =
-    posDate && arrivedDate ? formatDuration(arrivedDate - posDate) : "—";
-
-  // object_id -> shown as the title; datetime -> shown as "Position date" above.
-  const rows = flatten(coord)
-    .filter(([k]) => k !== "object_id" && k !== "datetime")
+  const rows = flatten(v && v.raw)
     .map(
-      ([k, v]) =>
-        `<tr><td class="pk">${escapeHtml(k)}</td><td class="pv">${escapeHtml(v)}</td></tr>`
+      ([k, val]) =>
+        `<tr><td class="pk">${escapeHtml(k)}</td><td class="pv">${escapeHtml(val)}</td></tr>`
     )
     .join("");
 
   return (
     `<div class="veh-popup">` +
-    `<div class="veh-popup-title">${escapeHtml(name)}</div>` +
+    `<div class="veh-popup-title">${escapeHtml(names[id] || id)}</div>` +
     `<div class="veh-popup-meta">Received: ${escapeHtml(arrived)}</div>` +
     `<div class="veh-popup-meta">Position date: ${escapeHtml(positionDate)}</div>` +
-    `<div class="veh-popup-meta">Delay: ${escapeHtml(delay)}</div>` +
     `<table class="veh-popup-table">${rows}</table>` +
     `</div>`
   );
 }
 
 // Build / update the row shown in the left sidebar for one vehicle.
-function updateSidebar(id, coord) {
+function updateSidebar(id) {
   const list = document.getElementById("vehicle-list");
   let row = document.getElementById("veh-" + id);
   if (!row) {
@@ -125,27 +118,30 @@ function updateSidebar(id, coord) {
     list.appendChild(row);
   }
 
-  const name = names[id] || id;
-  const pos = coord && coord.position;
-  const hasFix = pos && !(pos.latitude === 0 && pos.longitude === 0);
-  const speed = pos ? Math.round(pos.speed || 0) : 0;
-  const ignition = coord ? coord.ignition_status : "UNKNOWN";
-  const when = coord ? new Date(coord.datetime).toLocaleTimeString() : "—";
+  const v = lastVehicle[id];
+  const meta = [];
+  if (v) {
+    meta.push(hasFix(v) ? Math.round(v.speed || 0) + " km/h" : "no GPS fix");
+    if (v.ignition) meta.push(v.ignition);
+    meta.push(v.time && !isNaN(v.time) ? v.time.toLocaleTimeString() : "—");
+  } else {
+    meta.push("waiting for position…");
+  }
 
   row.innerHTML =
-    `<span class="veh-name">${name}</span>` +
-    `<span class="veh-meta">${hasFix ? speed + " km/h" : "no GPS fix"} · ${ignition} · ${when}</span>`;
+    `<span class="veh-name">${escapeHtml(names[id] || id)}</span>` +
+    `<span class="veh-meta">${escapeHtml(meta.join(" · "))}</span>`;
 }
 
 // Create or move the map marker for one vehicle.
-function placeMarker(id, lat, lng, coord) {
-  const popup = buildPopup(id, coord);
+function placeMarker(id, v) {
+  const popup = buildPopup(id, v);
 
   if (markers[id]) {
-    markers[id].setLatLng([lat, lng]).setPopupContent(popup);
+    markers[id].setLatLng([v.lat, v.lng]).setPopupContent(popup);
   } else {
-    // Leaflet caps popup width at 300px by default; widen it for long sensor names.
-    markers[id] = L.marker([lat, lng])
+    // Leaflet caps popup width at 300px by default; widen it for long field names.
+    markers[id] = L.marker([v.lat, v.lng])
       .addTo(map)
       .bindPopup(popup, { maxWidth: 460, minWidth: 320 });
   }
@@ -160,74 +156,146 @@ function placeMarker(id, lat, lng, coord) {
   }
 }
 
-// --- Handle one streamed coordinate record -----------------------------------
-function handleCoordinate(coord) {
-  const id = coord.object_id;
-  if (!id) return;
+// --- Callbacks handed to providers --------------------------------------------
+function setName(id, name) {
+  names[id] = name;
+  updateSidebar(id);
+}
 
-  // De-duplication: the API always re-sends the last known coordinate on
-  // (re)connect, so the same object_id + datetime can arrive more than once.
-  const key = coord.datetime;
+function upsert(v) {
+  const id = v.id;
+  if (v.name) names[id] = v.name;
+
+  // De-duplication: fm-track re-sends the last known coordinate on every
+  // (re)connect, and polling returns the same record until a new one exists.
+  const key = v.time ? v.time.getTime() : JSON.stringify(v.raw);
   if (lastKey[id] === key) return;
   lastKey[id] = key;
 
-  // Remember the full record and when it arrived so the popup can show it all.
-  lastCoord[id] = coord;
+  // Remember the record and when it arrived so the popup can show it all.
+  lastVehicle[id] = v;
   receivedAt[id] = new Date();
 
-  updateSidebar(id, coord);
+  updateSidebar(id);
 
-  const pos = coord.position || {};
   // 0/0 means the device has no GPS fix yet – don't drop a marker in the ocean.
-  if (pos.latitude === 0 && pos.longitude === 0) return;
-
-  placeMarker(id, pos.latitude, pos.longitude, coord);
+  if (hasFix(v)) placeMarker(id, v);
 }
 
-// --- Step 1: load the object list -------------------------------------------
-async function loadObjects() {
-  try {
-    const res = await fetch("/api/objects");
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
+// --- Connection form ------------------------------------------------------------
+// Credentials are remembered in this browser's localStorage for convenience.
+// That's fine for a local demo; a production app should not store passwords there.
+const STORAGE_PREFIX = "integrationDemo.";
 
-    // The Object API returns a single object or a list of objects.
-    const list = Array.isArray(data) ? data : [data];
-    for (const o of list) {
-      const id = o.object_id || o.id;
-      if (!id) continue;
-      names[id] = o.name || id;
-      updateSidebar(id, null); // pre-populate the sidebar before positions arrive
-    }
-  } catch (err) {
-    console.error("Failed to load objects:", err);
+function load(key, fallback) {
+  try {
+    const value = localStorage.getItem(STORAGE_PREFIX + key);
+    return value === null ? fallback : JSON.parse(value);
+  } catch {
+    return fallback;
   }
 }
 
-// --- Step 2: subscribe to the coordinate stream ------------------------------
-function connectStream() {
-  // EventSource is the browser's built-in SSE client. It reconnects on its own
-  // if the connection drops, which is exactly what the fm-track docs recommend.
-  const source = new EventSource("/api/stream");
+function save(key, value) {
+  try {
+    localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value));
+  } catch {
+    // Storage blocked – the values still work for this page load.
+  }
+}
 
-  source.onopen = () => setStatus("streaming live", "status--live");
+const providerSelect = document.getElementById("provider");
+const fieldsBox = document.getElementById("provider-fields");
 
-  source.onmessage = (event) => {
-    try {
-      handleCoordinate(JSON.parse(event.data));
-    } catch (err) {
-      console.error("Bad message:", event.data, err);
+const currentProvider = () =>
+  PROVIDERS.find((p) => p.id === providerSelect.value) || PROVIDERS[0];
+
+// Render the credential inputs the selected provider declares.
+function renderFields() {
+  const provider = currentProvider();
+  const saved = load("creds." + (provider.credsKey || provider.id), {});
+  fieldsBox.innerHTML = "";
+
+  for (const f of provider.fields) {
+    const id = "field-" + f.name;
+    const label = document.createElement("label");
+    label.htmlFor = id;
+    label.textContent = f.label;
+
+    let input;
+    if (f.type === "select") {
+      input = document.createElement("select");
+      for (const [value, text] of f.options) input.add(new Option(text, value));
+    } else {
+      input = document.createElement("input");
+      input.type = f.type;
+      input.spellcheck = false;
+      if (f.placeholder) input.placeholder = f.placeholder;
     }
+    input.id = id;
+    input.name = f.name;
+    if (saved[f.name] !== undefined) input.value = saved[f.name];
+
+    fieldsBox.append(label, input);
+  }
+
+  document.getElementById("provider-description").textContent = provider.description;
+}
+
+function readFields() {
+  const creds = {};
+  for (const f of currentProvider().fields) {
+    const value = document.getElementById("field-" + f.name).value;
+    creds[f.name] = f.type === "password" ? value : value.trim();
+  }
+  return creds;
+}
+
+// Clear the map and sidebar, then start the selected provider.
+function connect() {
+  if (stopProvider) stopProvider();
+  for (const m of Object.values(markers)) map.removeLayer(m);
+  for (const obj of [markers, names, lastKey, lastVehicle, receivedAt]) {
+    for (const k of Object.keys(obj)) delete obj[k];
+  }
+  document.getElementById("vehicle-list").innerHTML = "";
+  hasFittedBounds = false;
+
+  const provider = currentProvider();
+  const creds = readFields();
+  save("provider", provider.id);
+  save("creds." + (provider.credsKey || provider.id), creds);
+
+  // Callbacks from a previous connection are ignored once a new one starts.
+  const mine = ++session;
+  const live = (fn) => (...args) => {
+    if (mine === session) fn(...args);
   };
 
-  source.onerror = () => {
-    // The browser will retry automatically; just reflect it in the UI.
-    setStatus("reconnecting…", "status--connecting");
-  };
+  setStatus("connecting…", "connecting");
+  stopProvider = provider.start(creds, {
+    setStatus: live(setStatus),
+    setName: live(setName),
+    upsert: live(upsert),
+    authFailed: live((message) => {
+      setStatus(message, "error");
+      fieldsBox.querySelector("input")?.focus();
+    }),
+  });
 }
 
 // --- Boot --------------------------------------------------------------------
-(async function main() {
-  await loadObjects();
-  connectStream();
-})();
+for (const p of PROVIDERS) providerSelect.add(new Option(p.label, p.id));
+providerSelect.value = load("provider", PROVIDERS[0].id);
+if (!providerSelect.value) providerSelect.value = PROVIDERS[0].id;
+renderFields();
+
+providerSelect.addEventListener("change", () => {
+  renderFields();
+  connect();
+});
+document.getElementById("conn-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  connect();
+});
+connect();
